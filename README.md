@@ -13,8 +13,9 @@ A suitable [conda](https://conda.io) environment named `qvpo` can be created and
 conda create qvpo
 conda activate qvpo
 ```
-To get started, install the additionally required python packages into you environment.
+To get started, install the additionally required python packages into your environment.
 ```
+pip install setuptools==65.0.0 wheel==0.38.4
 pip install -r requirements.txt
 ```
 
