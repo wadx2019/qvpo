@@ -8,6 +8,11 @@ Training now defaults to the TQC-style distributional quantile critic from the
 `online` implementation and enables `torch.compile` with `fullgraph=True`,
 `dynamic=True`, and the `reduce-overhead` Inductor mode.
 
+The five quantile networks are stored as eight layer-wise packed parameters
+instead of forty independent Linear parameters. Their forward and backward
+passes therefore use four batched GEMMs. Checkpoints from the previous
+`nets.*` layout are migrated automatically when loaded.
+
 Weighted training and 64-candidate action augmentation are always enabled by
 default. The old action-gradient and augmentation-gradient paths, their second
 replay buffer, and the `--aug` switch have been removed.
@@ -40,8 +45,8 @@ The benchmark never silently falls back: an unavailable backend or graph break
 raises an error.
 
 See [REMOTE_BENCHMARK.md](./REMOTE_BENCHMARK.md) for the verified RTX 4090
-results (3.89x for the current augmented compute workload and 27–29 ms per
-complete steady-state training update).
+results, including the packed-critic follow-up measurement of 22.7–24.3 ms per
+complete steady-state training update.
 
 [[paper]](https://arxiv.org/abs/2405.16173) [[project page]](https://dingsht.tech/qvpo-webpage/)
 

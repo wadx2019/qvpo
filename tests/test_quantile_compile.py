@@ -57,6 +57,26 @@ def test_stateless_quantile_forward_matches_module():
     torch.testing.assert_close(actual, expected)
 
 
+def test_packed_quantile_critic_migrates_legacy_checkpoint():
+    torch.manual_seed(0)
+    critic = CriticQR(11, 3, hidden_dim=32, n_quantiles=7, n_nets=3)
+    state, action = torch.randn(8, 11), torch.randn(8, 3)
+    expected = critic(state, action)
+    legacy = {}
+    for layer, module_index in enumerate((0, 2, 4, 6)):
+        for net in range(critic.n_nets):
+            legacy[f'nets.{net}.{module_index}.weight'] = (
+                critic.layers[2 * layer][net].detach().clone()
+            )
+            legacy[f'nets.{net}.{module_index}.bias'] = (
+                critic.layers[2 * layer + 1][net].detach().clone()
+            )
+    restored = CriticQR(11, 3, hidden_dim=32, n_quantiles=7, n_nets=3)
+    restored.load_state_dict(legacy)
+    torch.testing.assert_close(restored(state, action), expected)
+    assert len(tuple(restored.parameters())) == 8
+
+
 def test_stateless_denoiser_forward_matches_module():
     torch.manual_seed(0)
     model = Model(11, 3, hidden_size=32, time_dim=8)
