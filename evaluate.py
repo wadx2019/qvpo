@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from agent.qvpo import QVPO
-from agent.replay_memory import ReplayMemory, DiffusionMemory
+from agent.replay_memory import ReplayMemory
 
 from tensorboardX import SummaryWriter
 import gym
@@ -44,15 +44,21 @@ def readParser():
                         help='diffusion learning rate (default: 0.0001)')
     parser.add_argument('--critic_lr', type=float, default=0.0003, metavar='G',
                         help='critic learning rate (default: 0.0003)')
-    parser.add_argument('--action_lr', type=float, default=0.03, metavar='G',
-                        help='diffusion learning rate (default: 0.03)')
+    parser.add_argument('--critic_type', choices=('quantile', 'double'),
+                        default='quantile')
+    parser.add_argument('--n_quantiles', type=int, default=25)
+    parser.add_argument('--n_nets', type=int, default=5)
+    parser.add_argument('--top_quantiles_to_drop_per_net', type=int, default=2)
+    parser.add_argument('--compile', dest='compile', action='store_true',
+                        default=True)
+    parser.add_argument('--no_compile', dest='compile', action='store_false')
+    parser.add_argument('--compile_mode', default='reduce-overhead',
+                        choices=('default', 'reduce-overhead', 'max-autotune'))
+    parser.add_argument('--compile_backend', default='inductor')
+    parser.add_argument('--sampling_precision', default='float16',
+                        choices=('float16', 'float32'))
     parser.add_argument('--noise_ratio', type=float, default=1.0, metavar='G',
                         help='noise ratio in sample process (default: 1.0)')
-
-    parser.add_argument('--action_gradient_steps', type=int, default=20, metavar='N',
-                        help='action gradient steps (default: 20)')
-    parser.add_argument('--ratio', type=float, default=0.1, metavar='G',
-                        help='the ratio of action grad norm to action_dim (default: 0.1)')
     parser.add_argument('--ac_grad_norm', type=float, default=2.0, metavar='G',
                         help='actor and critic grad norm (default: 1.0)')
 
@@ -68,9 +74,10 @@ def readParser():
     parser.add_argument('--beta', type=float, default=1.0, metavar='G',
                         help='expQ weight (default: 1.0)')
 
-    parser.add_argument('--weighted', action="store_true", help="weighted training")
-
-    parser.add_argument('--aug', action="store_true", help="augmentation")
+    parser.add_argument('--weighted', dest='weighted', action='store_true',
+                        default=True, help='enable weighted training (default)')
+    parser.add_argument('--no_weighted', dest='weighted', action='store_false',
+                        help='disable weighted training for ablation')
 
     parser.add_argument('--train_sample', type=int, default=64, metavar='N',
                         help='train_sample (default: 64)')
@@ -88,8 +95,6 @@ def readParser():
     parser.add_argument('--deterministic', action="store_true", help="deterministic mode")
 
     parser.add_argument('--q_transform', type=str, default='qadv', metavar='S', help="q_transform (default: qrelu)")
-
-    parser.add_argument('--gradient', action="store_true", help="aug gradient")
 
     parser.add_argument('--policy_freq', type=int, default=1, metavar='N', help="policy_freq (default: 1)")
 
@@ -139,10 +144,12 @@ def evaluate(env, agent, steps, render):
 def main(args=None):
 
     device = torch.device(args.cuda)
+    if args.compile and device.type == 'cuda':
+        torch.set_float32_matmul_precision('high')
 
     dir = "record"
     # dir = "test"
-    log_dir = os.path.join(dir, f'{args.env_name}', f'policy_type={args.policy_type}', f'ratio={args.ratio}',
+    log_dir = os.path.join(dir, f'{args.env_name}', f'policy_type={args.policy_type}',
                            f'seed={args.seed}')
 
     # Initial environment
@@ -167,9 +174,7 @@ def main(args=None):
     log_interval = 10
 
     memory = ReplayMemory(state_size, action_size, memory_size, device)
-    diffusion_memory = DiffusionMemory(state_size, action_size, memory_size, device)
-
-    agent = QVPO(args, state_size, env.action_space, memory, diffusion_memory, device)
+    agent = QVPO(args, state_size, env.action_space, memory, device)
     agent.load_model(os.path.join('./results', prefix + '_' + name), id=args.id)
     if os.path.exists(os.path.join('./results', prefix + '_' + name, 'config_' + args.id[:-2] + '.pkl')):
         with open(os.path.join('./results', prefix + '_' + name, 'config_' + args.id[:-2] + '.pkl'), 'rb') as f:

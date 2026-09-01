@@ -26,15 +26,33 @@ class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
+        half_dim = dim // 2
+        scale = math.log(10000) / (half_dim - 1)
+        self.register_buffer(
+            'frequencies',
+            torch.exp(torch.arange(half_dim, dtype=torch.float32) * -scale),
+            persistent=False,
+        )
 
     def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
+        emb = x[:, None] * self.frequencies[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
+
+
+def quantile_huber_loss(quantiles, samples):
+    """Quantile-regression Huber loss used by the distributional critic."""
+    pairwise_delta = samples[:, None, None, :] - quantiles[:, :, :, None]
+    abs_delta = pairwise_delta.abs()
+    huber = torch.where(abs_delta > 1.0,
+                        abs_delta - 0.5,
+                        0.5 * pairwise_delta.square())
+    n_quantiles = quantiles.shape[2]
+    tau = ((torch.arange(n_quantiles, device=quantiles.device,
+                         dtype=quantiles.dtype) + 0.5) / n_quantiles)
+    weight = (tau[None, None, :, None] -
+              (pairwise_delta < 0).to(quantiles.dtype)).abs()
+    return (weight * huber).mean()
 
 #-----------------------------------------------------------------------------#
 #---------------------------------- sampling ---------------------------------#

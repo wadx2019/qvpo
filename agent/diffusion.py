@@ -24,6 +24,10 @@ class Diffusion(nn.Module):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.model = Model(state_dim, action_dim)
+        self._compiled_model_forward = None
+        self._compiled_sample_step = None
+        self._compiled_sample_loop = None
+        self.sampling_dtype = None
 
         self.max_noise_ratio = noise_ratio
         self.noise_ratio = noise_ratio
@@ -98,7 +102,13 @@ class Diffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(self, x, t, s):
-        x_recon = self.predict_start_from_noise(x, t=t, noise=self.model(x, t, s))
+        if self._compiled_model_forward is None:
+            model_output = self.model(x, t, s)
+        else:
+            model_output = self._compiled_model_forward(
+                x, t, s, tuple(self.model.parameters())
+            )
+        x_recon = self.predict_start_from_noise(x, t=t, noise=model_output)
 
         if self.clip_denoised:
             x_recon.clamp_(-1., 1.)
@@ -108,8 +118,94 @@ class Diffusion(nn.Module):
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance
 
+    def set_compiled_model_forward(self, compiled_forward):
+        """Install the shared full-graph denoiser callable after deepcopy."""
+        self._compiled_model_forward = compiled_forward
+
+    def set_compiled_sample_step(self, compiled_step):
+        """Install the graph that fuses a complete DDPM sampling step."""
+        self._compiled_sample_step = compiled_step
+
+    def set_compiled_sample_loop(self, compiled_sample_loop):
+        """Install one graph containing the complete fixed-step DDPM loop."""
+        self._compiled_sample_loop = compiled_sample_loop
+
+    def functional_sample_loop(self, state, x, parameters, noise_ratio):
+        """Stateless, fully unrolled sampler shared by actor and target actor."""
+        batch_size = x.shape[0]
+        for i in reversed(range(self.n_timesteps)):
+            timesteps = torch.full(
+                (batch_size,), i, device=x.device, dtype=torch.long
+            )
+            model_output = self.model.functional_forward(
+                x, timesteps, state, parameters
+            )
+            if self.predict_epsilon:
+                x_recon = (
+                    self.sqrt_recip_alphas_cumprod[i] * x
+                    - self.sqrt_recipm1_alphas_cumprod[i] * model_output
+                )
+            else:
+                x_recon = model_output
+            if self.clip_denoised:
+                x_recon = x_recon.clamp(-1.0, 1.0)
+
+            model_mean = (
+                self.posterior_mean_coef1[i] * x_recon
+                + self.posterior_mean_coef2[i] * x
+            )
+            noise = torch.randn_like(x)
+            if i > 0:
+                x = (
+                    model_mean
+                    + (0.5 * self.posterior_log_variance_clipped[i]).exp()
+                    * noise * noise_ratio
+                )
+            else:
+                x = model_mean
+        return x
+
+    def functional_sample_step(self, x, t, state, parameters, noise_ratio):
+        """Stateless denoiser, posterior, and noise update for one DDPM step."""
+        use_amp = self.sampling_dtype is not None and x.device.type == 'cuda'
+        amp_dtype = self.sampling_dtype or torch.float16
+        with torch.autocast(
+            device_type=x.device.type, dtype=amp_dtype, enabled=use_amp
+        ):
+            model_output = self.model.functional_forward(
+                x, t, state, parameters
+            )
+        if self.predict_epsilon:
+            x_recon = (
+                extract(self.sqrt_recip_alphas_cumprod, t, x.shape) * x
+                - extract(self.sqrt_recipm1_alphas_cumprod, t, x.shape)
+                * model_output
+            )
+        else:
+            x_recon = model_output
+        if self.clip_denoised:
+            x_recon = x_recon.clamp(-1.0, 1.0)
+        model_mean = (
+            extract(self.posterior_mean_coef1, t, x.shape) * x_recon
+            + extract(self.posterior_mean_coef2, t, x.shape) * x
+        )
+        model_log_variance = extract(
+            self.posterior_log_variance_clipped, t, x.shape
+        )
+        noise = torch.randn_like(x)
+        nonzero_mask = (t != 0).to(x.dtype).reshape(x.shape[0], 1)
+        return (
+            model_mean
+            + nonzero_mask * (0.5 * model_log_variance).exp()
+            * noise * noise_ratio
+        )
+
     @torch.no_grad()
     def p_sample(self, x, t, s):
+        if self._compiled_sample_step is not None:
+            return self._compiled_sample_step(
+                x, t, s, tuple(self.model.parameters()), self.noise_ratio
+            ).clone()
         b, *_, device = *x.shape, x.device
 
         model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, s=s)
@@ -125,9 +221,16 @@ class Diffusion(nn.Module):
     def p_sample_loop(self, state, shape):
         device = self.betas.device
 
-        batch_size = shape[0]
         x = torch.randn(shape, device=device)
 
+        if self._compiled_sample_loop is not None:
+            # The result feeds a different compiled graph (critic ranking).
+            # Clone outside the CUDA Graph-owned storage before that call.
+            return self._compiled_sample_loop(
+                state, x, tuple(self.model.parameters()), self.noise_ratio
+            ).clone()
+
+        batch_size = shape[0]
         for i in reversed(range(0, self.n_timesteps)):
             timesteps = torch.full((batch_size,), i, device=device, dtype=torch.long)
             x = self.p_sample(x, timesteps, state)
@@ -155,8 +258,9 @@ class Diffusion(nn.Module):
             shape = (batch_size, self.action_dim)
             action = self.p_sample_loop(state, shape)
             action.clamp_(-1., 1.)
-            q1, q2 = q_func(state, action)
-            q = torch.min(q1, q2)
+            q_output = q_func(state, action)
+            q = (torch.min(q_output[0], q_output[1])
+                 if isinstance(q_output, tuple) else q_output)
             action = action.view(self.eval_sample, raw_batch_size, -1).transpose(0,1)
             q = q.view(self.eval_sample, raw_batch_size, -1).transpose(0,1)
             action_idx = torch.argmax(q, dim=1, keepdim=True).repeat(1,1,self.action_dim)
@@ -168,8 +272,9 @@ class Diffusion(nn.Module):
             shape = (batch_size, self.action_dim)
             action = self.p_sample_loop(state, shape)
             action.clamp_(-1., 1.)
-            q1, q2 = q_func(state, action)
-            q = torch.min(q1, q2)
+            q_output = q_func(state, action)
+            q = (torch.min(q_output[0], q_output[1])
+                 if isinstance(q_output, tuple) else q_output)
             action = action.view(self.behavior_sample, raw_batch_size, -1).transpose(0,1)
             q = q.view(self.behavior_sample, raw_batch_size, -1).transpose(0,1)
             action_idx = torch.argmax(q, dim=1, keepdim=True).repeat(1,1,self.action_dim)
@@ -188,8 +293,9 @@ class Diffusion(nn.Module):
         shape = (batch_size, self.action_dim)
         action = self.p_sample_loop(state, shape)
         action.clamp_(-1., 1.)
-        q1, q2 = q_func(state, action)
-        q = torch.min(q1, q2)
+        q_output = q_func(state, action)
+        q = (torch.min(q_output[0], q_output[1])
+             if isinstance(q_output, tuple) else q_output)
         action = action.view(times, raw_batch_size, -1).transpose(0, 1)
         q = q.view(times, raw_batch_size, -1).transpose(0, 1)
         mean = q.mean()

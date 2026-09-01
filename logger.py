@@ -12,8 +12,7 @@ class Logger(object):
         self.max_epochs = max_epochs
         self.times = times
         if config is not None:
-            if not os.path.exists(path):
-                os.mkdir(path)
+            os.makedirs(path, exist_ok=True)
             with open(f'{path}/config_{id}.pkl', "wb") as f:
                 pickle.dump(config, f)
 
@@ -27,7 +26,6 @@ class Logger(object):
         self.pointer += 1
 
     def save(self, path, id):
-        if not os.path.exists(path):
-            os.mkdir(path)
+        os.makedirs(path, exist_ok=True)
         with open(os.path.join(path, id), "wb") as f:
             pickle.dump(self, f)
