@@ -34,19 +34,13 @@ python main.py --env_name Hopper-v3
 python main.py --no_compile
 python main.py --critic_type double
 
-# Verify graph count and benchmark steady-state CUDA performance
-python benchmark_compile.py --batch-size 256 --iterations 100
 ```
 
 Inductor CUDA compilation requires a working Triton installation. Official
 PyTorch Linux CUDA wheels install a matching build. On Windows, install a
 `triton-windows` build matching the installed PyTorch, or use `--no_compile`.
-The benchmark never silently falls back: an unavailable backend or graph break
-raises an error.
-
-See [REMOTE_BENCHMARK.md](./REMOTE_BENCHMARK.md) for the verified RTX 4090
-results, including the packed-critic follow-up measurement of 22.7–24.3 ms per
-complete steady-state training update.
+An unavailable backend or graph break raises an error instead of silently
+falling back to eager execution.
 
 [[paper]](https://arxiv.org/abs/2405.16173) [[project page]](https://dingsht.tech/qvpo-webpage/)
 
