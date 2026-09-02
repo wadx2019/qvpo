@@ -101,7 +101,6 @@ def readParser():
     parser.add_argument('--cut', type=float, default=1.0, metavar='G', help="cut (default: 1.0)")
     parser.add_argument('--times', type=int, default=1, metavar='N', help="times (default: 1)")
 
-    parser.add_argument('--epsilon', type=float, default=0.0, metavar='G', help="eps greedy (default: 0.0)")
     parser.add_argument('--entropy_alpha', type=float, default=0.02, metavar='G', help="entropy_alpha (default: 0.02)")
 
     parser.add_argument('--id', type=str, metavar='S', help="id")

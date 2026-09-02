@@ -131,38 +131,15 @@ class Diffusion(nn.Module):
         self._compiled_sample_loop = compiled_sample_loop
 
     def functional_sample_loop(self, state, x, parameters, noise_ratio):
-        """Stateless, fully unrolled sampler shared by actor and target actor."""
+        """Stateless, fully unrolled sampler for the fused interaction graph."""
         batch_size = x.shape[0]
         for i in reversed(range(self.n_timesteps)):
             timesteps = torch.full(
                 (batch_size,), i, device=x.device, dtype=torch.long
             )
-            model_output = self.model.functional_forward(
-                x, timesteps, state, parameters
+            x = self.functional_sample_step(
+                x, timesteps, state, parameters, noise_ratio
             )
-            if self.predict_epsilon:
-                x_recon = (
-                    self.sqrt_recip_alphas_cumprod[i] * x
-                    - self.sqrt_recipm1_alphas_cumprod[i] * model_output
-                )
-            else:
-                x_recon = model_output
-            if self.clip_denoised:
-                x_recon = x_recon.clamp(-1.0, 1.0)
-
-            model_mean = (
-                self.posterior_mean_coef1[i] * x_recon
-                + self.posterior_mean_coef2[i] * x
-            )
-            noise = torch.randn_like(x)
-            if i > 0:
-                x = (
-                    model_mean
-                    + (0.5 * self.posterior_log_variance_clipped[i]).exp()
-                    * noise * noise_ratio
-                )
-            else:
-                x = model_mean
         return x
 
     def functional_sample_step(self, x, t, state, parameters, noise_ratio):

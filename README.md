@@ -6,7 +6,7 @@ Code release for **Diffusion-based Reinforcement Learning via Q-weighted Variati
 
 Training now defaults to the TQC-style distributional quantile critic from the
 `online` implementation and enables `torch.compile` with `fullgraph=True`,
-`dynamic=True`, and the `reduce-overhead` Inductor mode.
+static shapes, and the `reduce-overhead` Inductor mode.
 
 The five quantile networks are stored as eight layer-wise packed parameters
 instead of forty independent Linear parameters. Their forward and backward
@@ -17,14 +17,17 @@ Weighted training and 64-candidate action augmentation are always enabled by
 default. The old action-gradient and augmentation-gradient paths, their second
 replay buffer, and the `--aug` switch have been removed.
 
-The hot tensor path has five runtime graphs: a complete no-grad DDPM step
-(denoiser, posterior, and noise update), quantile candidate ranking/selection,
-critic inference, critic target construction plus quantile loss, and diffusion
-actor loss. Five is the measured minimum. Explicit parameter tuples let online
-and target networks reuse graphs instead of compiling duplicates. No-grad DDPM
-sampling defaults to FP16 tensor cores (`--sampling_precision fp32` disables
-this), while critic/loss/optimizer math remains FP32. Network optimizers use
-fused Adam and target updates use foreach kernels.
+The hot tensor path has four runtime graphs: the full online interaction graph,
+a critic-training graph containing the complete target DDPM loop, candidate
+ranking and quantile loss, an actor-training graph containing its complete DDPM
+loop, augmentation ranking/weighting and actor loss, plus critic inference for
+utility calls. Target candidate quantiles are gathered directly, avoiding a
+selected-action materialization and a second target-critic forward. Explicit
+parameter tuples let online and target networks reuse graphs instead of
+compiling duplicates. No-grad DDPM sampling defaults to FP16 tensor cores
+(`--sampling_precision fp32` disables this), while critic, loss, and optimizer
+math remains FP32. Network optimizers use fused Adam and target updates use
+foreach kernels.
 
 ```bash
 # Compiled quantile-critic training (new default)
